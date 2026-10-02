@@ -1,0 +1,38 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Large datasets
+*.jsonl
+*.parquet
+*.arrow
+data/
+
+# Model weights & training runs (large binaries)
+*.pt
+*.pth
+*.bin
+*.safetensors
+runs/
+st_best_model/
+st_exported_model/
+checkpoints/
+
+# Virtual Environments
+.venv/
+env/
+venv/
+ENV/
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# Operating System files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
