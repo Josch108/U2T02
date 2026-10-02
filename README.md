@@ -127,3 +127,4 @@ El script:
 2. Evalúa localmente en STS-B test.
 3. Lo sube al Hub con un Model Card detallado.
 4. Vuelve a descargar el modelo desde el Hub y comprueba que el score en el test split sea exactamente idéntico.
+# U2T02
