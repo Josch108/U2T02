@@ -61,8 +61,12 @@ def load_snli_100k(file_path: str) -> Tuple[List[str], List[Dict[str, Optional[s
     premise_map: Dict[str, Dict[str, List[str]]] = {}
 
     for record in records:
-        premise = record.get("premise", "").strip()
-        hypothesis = record.get("hypothesis", "").strip()
+        # Preserve the exact strings from the supplied file when counting
+        # "unique sentences". The assignment's reference count (165,529)
+        # is based on the raw SNLI strings; stripping whitespace merges one
+        # distinct entry and incorrectly produces 165,528.
+        premise = record.get("premise", "")
+        hypothesis = record.get("hypothesis", "")
         label = record.get("label")
 
         if premise:
@@ -70,7 +74,7 @@ def load_snli_100k(file_path: str) -> Tuple[List[str], List[Dict[str, Optional[s
         if hypothesis:
             unique_sentences.add(hypothesis)
 
-        if not premise or not hypothesis or label not in (0, 1, 2):
+        if not premise.strip() or not hypothesis.strip() or label not in (0, 1, 2):
             continue
 
         premise_map.setdefault(
