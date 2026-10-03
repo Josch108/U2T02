@@ -1,42 +1,31 @@
 """
-Evaluation metrics and analysis for SimCSE models (U2T02).
-Implements:
-  1. STS-B Spearman correlation (x100) via Cosine Similarity (no regressor).
-  2. Wang & Isola (2020) Alignment and Uniformity metrics.
-  3. Cosine similarity distribution grouped by human rating intervals.
-  4. Nearest-neighbor sentence retrieval and qualitative error analysis.
-  5. Baseline reproducibility verification for:
-     - raw bert-base-uncased (Reference: 59.31 dev / 47.29 test)
-     - SBERT-2019 bert-base-nli-mean-tokens (Reference: 80.77 dev / 76.98 test)
+Evaluation and qualitative analysis for U2T02 SimCSE.
+
+Required outputs:
+- STS-B Spearman x100 using normalized embeddings and cosine similarity.
+- Wang & Isola alignment and uniformity.
+- Cosine-similarity distributions grouped by human score.
+- Nearest-neighbor retrieval examples, including automatic candidate failure cases.
 """
 
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
+
 import numpy as np
 import torch
 import torch.nn.functional as F
 from scipy.stats import spearmanr
-from transformers import AutoModel, AutoTokenizer
 from sentence_transformers import SentenceTransformer
 
 
 def compute_alignment(x: torch.Tensor, y: torch.Tensor, alpha: float = 2.0) -> float:
-    """
-    Wang & Isola (2020) Alignment metric:
-    L_align = E_{(x, y) ~ p_pos} [ || f(x) - f(y) ||^alpha ]
-    x and y must be L2-normalized embeddings of paired/positive sentences.
-    """
     return (torch.norm(x - y, p=2, dim=1) ** alpha).mean().item()
 
 
 def compute_uniformity(x: torch.Tensor, t: float = 2.0) -> float:
-    """
-    Wang & Isola (2020) Uniformity metric:
-    L_uniform = log E_{x, y ~ p_data} [ e^(-t || f(x) - f(y) ||^2) ]
-    x must be L2-normalized embeddings.
-    """
-    # pairwise squared Euclidean distance: ||x - y||^2 = 2 - 2*(x . y)
-    sq_pdist = torch.pdist(x, p=2) ** 2
-    return torch.log(torch.mean(torch.exp(-t * sq_pdist))).item()
+    if x.size(0) < 2:
+        return float("nan")
+    squared_distances = torch.pdist(x, p=2) ** 2
+    return torch.log(torch.mean(torch.exp(-t * squared_distances))).item()
 
 
 def encode_sentences(
@@ -45,49 +34,41 @@ def encode_sentences(
     tokenizer,
     batch_size: int = 64,
     device: str = "cpu",
-    pooling: str = "cls"
+    pooling: str = "cls",
+    max_length: int = 64,
 ) -> torch.Tensor:
-    """
-    Encodes a list of sentences into L2-normalized embeddings using PyTorch model.
-    """
     all_embeddings = []
     model.eval()
 
     with torch.no_grad():
-        for i in range(0, len(sentences), batch_size):
-            batch = sentences[i : i + batch_size]
+        for start in range(0, len(sentences), batch_size):
+            batch = sentences[start : start + batch_size]
             inputs = tokenizer(
                 batch,
                 padding=True,
                 truncation=True,
-                max_length=64,
-                return_tensors="pt"
+                max_length=max_length,
+                return_tensors="pt",
             ).to(device)
 
             if hasattr(model, "get_pooled_embedding"):
-                # SimCSE custom wrapper
-                embs = model.get_pooled_embedding(
+                embeddings = model.get_pooled_embedding(
                     inputs["input_ids"],
                     inputs["attention_mask"],
-                    inputs.get("token_type_ids", None),
-                    return_for_eval=True
+                    inputs.get("token_type_ids"),
+                    apply_mlp=False,
                 )
             else:
-                # Raw HuggingFace AutoModel
-                outputs = model(**inputs)
-                last_hidden = outputs.last_hidden_state
+                hidden = model(**inputs).last_hidden_state
                 if pooling == "cls":
-                    embs = last_hidden[:, 0]
+                    embeddings = hidden[:, 0]
                 elif pooling == "mean":
-                    input_mask_expanded = inputs["attention_mask"].unsqueeze(-1).expand(last_hidden.size()).float()
-                    sum_embeddings = torch.sum(last_hidden * input_mask_expanded, 1)
-                    sum_mask = torch.clamp(input_mask_expanded.sum(1), min=1e-9)
-                    embs = sum_embeddings / sum_mask
+                    mask = inputs["attention_mask"].unsqueeze(-1).expand(hidden.size()).float()
+                    embeddings = (hidden * mask).sum(1) / torch.clamp(mask.sum(1), min=1e-9)
                 else:
-                    raise ValueError(f"Unknown pooling {pooling}")
+                    raise ValueError(f"Unknown pooling mode: {pooling}")
 
-            embs_norm = F.normalize(embs, p=2, dim=1)
-            all_embeddings.append(embs_norm.cpu())
+            all_embeddings.append(F.normalize(embeddings, p=2, dim=1).cpu())
 
     return torch.cat(all_embeddings, dim=0)
 
@@ -99,105 +80,169 @@ def evaluate_stsb(
     batch_size: int = 64,
     device: str = "cpu",
     pooling: str = "cls",
-    compute_geometry: bool = True
-) -> Dict[str, float]:
-    """
-    Evaluates model on STS-B pairs:
-    1. Embeds sentence1 and sentence2
-    2. Takes cosine similarity (dot product of L2-normalized vectors)
-    3. Computes Spearman rank correlation with ground-truth human scores (*100)
-    4. Optionally computes Wang & Isola alignment and uniformity.
-    """
-    s1_list = [d["sentence1"] for d in stsb_data]
-    s2_list = [d["sentence2"] for d in stsb_data]
-    scores = np.array([d["score"] for d in stsb_data])
+    max_length: int = 64,
+    compute_geometry: bool = True,
+) -> Dict:
+    sentence1 = [row["sentence1"] for row in stsb_data]
+    sentence2 = [row["sentence2"] for row in stsb_data]
+    scores = np.asarray([row["score"] for row in stsb_data], dtype=np.float32)
 
-    emb1 = encode_sentences(s1_list, model, tokenizer, batch_size, device, pooling)
-    emb2 = encode_sentences(s2_list, model, tokenizer, batch_size, device, pooling)
+    emb1 = encode_sentences(
+        sentence1, model, tokenizer, batch_size, device, pooling, max_length
+    )
+    emb2 = encode_sentences(
+        sentence2, model, tokenizer, batch_size, device, pooling, max_length
+    )
 
-    # Cosine similarity for normalized vectors is elementwise dot product
-    cos_sims = (emb1 * emb2).sum(dim=1).numpy()
+    cosine_similarities = (emb1 * emb2).sum(dim=1).numpy()
+    spearman = float(spearmanr(cosine_similarities, scores).correlation * 100.0)
 
-    # Spearman rank correlation
-    spearman_corr, _ = spearmanr(cos_sims, scores)
-    spearman_score = float(spearman_corr * 100.0)
-
-    results = {
-        "spearman": spearman_score,
-        "cosine_similarities": cos_sims,
-        "ground_truth_scores": scores
+    result: Dict = {
+        "spearman": spearman,
+        "cosine_similarities": cosine_similarities,
+        "ground_truth_scores": scores,
     }
 
     if compute_geometry:
-        # Alignment: computed on paired sentences in STS-B
-        # High similarity pairs (score >= 4.0 out of 5.0) as positive pairs following Gao et al.
-        pos_mask = scores >= 4.0
-        if pos_mask.sum() > 0:
-            align = compute_alignment(emb1[pos_mask], emb2[pos_mask])
+        # Following the SimCSE analysis, STS-B pairs with human score >= 4 are
+        # treated as positive pairs for alignment.
+        positive_mask = scores >= 4.0
+        if positive_mask.any():
+            alignment = compute_alignment(emb1[positive_mask], emb2[positive_mask])
         else:
-            align = compute_alignment(emb1, emb2)
+            alignment = compute_alignment(emb1, emb2)
 
-        # Uniformity: computed across all unique sentence representations in STS-B
-        all_embs = torch.cat([emb1, emb2], dim=0)
-        uniform = compute_uniformity(all_embs)
+        all_embeddings = torch.cat([emb1, emb2], dim=0)
+        result["alignment"] = alignment
+        result["uniformity"] = compute_uniformity(all_embeddings)
 
-        results["alignment"] = align
-        results["uniformity"] = uniform
-
-    return results
+    return result
 
 
-def evaluate_sentence_transformer(
-    model_name: str,
-    stsb_data: List[Dict]
-) -> Dict[str, float]:
-    """
-    Evaluates a pretrained SentenceTransformer model (e.g., SBERT-2019).
-    """
+def evaluate_sentence_transformer(model_name: str, stsb_data: List[Dict]) -> Dict:
     model = SentenceTransformer(model_name)
-    s1_list = [d["sentence1"] for d in stsb_data]
-    s2_list = [d["sentence2"] for d in stsb_data]
-    scores = np.array([d["score"] for d in stsb_data])
+    s1 = [row["sentence1"] for row in stsb_data]
+    s2 = [row["sentence2"] for row in stsb_data]
+    scores = np.asarray([row["score"] for row in stsb_data], dtype=np.float32)
 
-    emb1 = torch.tensor(model.encode(s1_list, normalize_embeddings=True))
-    emb2 = torch.tensor(model.encode(s2_list, normalize_embeddings=True))
+    emb1 = torch.tensor(model.encode(s1, normalize_embeddings=True, show_progress_bar=False))
+    emb2 = torch.tensor(model.encode(s2, normalize_embeddings=True, show_progress_bar=False))
 
-    cos_sims = (emb1 * emb2).sum(dim=1).numpy()
-    spearman_corr, _ = spearmanr(cos_sims, scores)
+    cosine_similarities = (emb1 * emb2).sum(dim=1).numpy()
+    spearman = float(spearmanr(cosine_similarities, scores).correlation * 100.0)
 
-    pos_mask = scores >= 4.0
-    align = compute_alignment(emb1[pos_mask], emb2[pos_mask]) if pos_mask.sum() > 0 else compute_alignment(emb1, emb2)
-    uniform = compute_uniformity(torch.cat([emb1, emb2], dim=0))
+    positive_mask = scores >= 4.0
+    alignment = (
+        compute_alignment(emb1[positive_mask], emb2[positive_mask])
+        if positive_mask.any()
+        else compute_alignment(emb1, emb2)
+    )
+    uniformity = compute_uniformity(torch.cat([emb1, emb2], dim=0))
 
     return {
-        "spearman": float(spearman_corr * 100.0),
-        "alignment": align,
-        "uniformity": uniform,
-        "cosine_similarities": cos_sims
+        "spearman": spearman,
+        "alignment": alignment,
+        "uniformity": uniformity,
+        "cosine_similarities": cosine_similarities,
+        "ground_truth_scores": scores,
     }
 
 
 def analyze_similarity_distribution(
-    cosine_sims: np.ndarray,
-    ground_truth_scores: np.ndarray
+    cosine_similarities: np.ndarray,
+    ground_truth_scores: np.ndarray,
 ) -> Dict[str, Dict[str, float]]:
-    """
-    Groups cosine similarities by STS human score bins:
-      [0, 1), [1, 2), [2, 3), [3, 4), [4, 5]
-    Returns mean and std of cosine similarities for each bin.
-    """
-    bins = [(0.0, 1.0), (1.0, 2.0), (2.0, 3.0), (3.0, 4.0), (4.0, 5.01)]
-    analysis = {}
+    bins = [
+        (0.0, 1.0),
+        (1.0, 2.0),
+        (2.0, 3.0),
+        (3.0, 4.0),
+        (4.0, 5.01),
+    ]
+    output: Dict[str, Dict[str, float]] = {}
+
     for low, high in bins:
         mask = (ground_truth_scores >= low) & (ground_truth_scores < high)
-        bin_sims = cosine_sims[mask]
-        label = f"[{low:.0f}, {high if high <= 5.0 else 5.0:.0f}]"
-        if len(bin_sims) > 0:
-            analysis[label] = {
-                "count": int(len(bin_sims)),
-                "mean_sim": float(np.mean(bin_sims)),
-                "std_sim": float(np.std(bin_sims)),
-                "min_sim": float(np.min(bin_sims)),
-                "max_sim": float(np.max(bin_sims))
+        values = cosine_similarities[mask]
+        label = f"{low:.0f}-{min(high, 5.0):.0f}"
+        if values.size:
+            output[label] = {
+                "count": int(values.size),
+                "mean": float(values.mean()),
+                "std": float(values.std()),
+                "min": float(values.min()),
+                "max": float(values.max()),
             }
-    return analysis
+    return output
+
+
+def build_retrieval_analysis(
+    model,
+    tokenizer,
+    stsb_data: List[Dict],
+    batch_size: int = 64,
+    device: str = "cpu",
+    pooling: str = "cls",
+    max_length: int = 64,
+    query_count: int = 5,
+    candidate_limit: int = 500,
+) -> Dict:
+    """Create nearest-neighbor examples from STS-B sentences.
+
+    A failure candidate is a query whose nearest neighbor has low lexical/semantic
+    supervision evidence according to STS-B labels when that exact pair exists.
+    Because STS-B is pair-based rather than a retrieval corpus, the returned
+    failure candidate is explicitly qualitative and must be discussed by the team.
+    """
+    sentence_pool: List[str] = []
+    seen = set()
+    for row in stsb_data:
+        for key in ("sentence1", "sentence2"):
+            sentence = row[key]
+            if sentence not in seen:
+                seen.add(sentence)
+                sentence_pool.append(sentence)
+            if len(sentence_pool) >= candidate_limit:
+                break
+        if len(sentence_pool) >= candidate_limit:
+            break
+
+    embeddings = encode_sentences(
+        sentence_pool,
+        model,
+        tokenizer,
+        batch_size=batch_size,
+        device=device,
+        pooling=pooling,
+        max_length=max_length,
+    )
+    similarity_matrix = embeddings @ embeddings.T
+    similarity_matrix.fill_diagonal_(-1.0)
+
+    examples = []
+    for query_index in np.linspace(
+        0, len(sentence_pool) - 1, num=min(query_count, len(sentence_pool)), dtype=int
+    ):
+        values, indices = torch.topk(similarity_matrix[query_index], k=min(3, len(sentence_pool) - 1))
+        neighbors = [
+            {
+                "sentence": sentence_pool[idx],
+                "cosine_similarity": float(score),
+            }
+            for score, idx in zip(values.tolist(), indices.tolist())
+        ]
+        examples.append(
+            {
+                "query": sentence_pool[query_index],
+                "neighbors": neighbors,
+            }
+        )
+
+    return {
+        "corpus_size": len(sentence_pool),
+        "examples": examples,
+        "note": (
+            "Inspect at least one retrieved neighbor manually and discuss why it is a "
+            "failure or success case in the report."
+        ),
+    }
