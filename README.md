@@ -1,4 +1,4 @@
-# U2T02: SimCSE — Train Your Own Sentence Embedding Model
+# U2T02: SimCSE — Train Your Own Sentence Embedding Model 
 
 Proyecto completo para replicar y evaluar **SimCSE** (*Simple Contrastive Learning of Sentence Embeddings*, Gao et al., EMNLP 2021) en modos **Unsupervised** y **Supervised** con *hard negatives*, usando `bert-base-uncased` y el subconjunto `snli_train_100k.jsonl`.
 
