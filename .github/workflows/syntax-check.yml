@@ -1,0 +1,32 @@
+name: Syntax Check
+
+on:
+  push:
+    branches:
+      - main
+      - fix/u2t02-simcse-compliance
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  syntax:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Compile Python sources
+        run: python -m compileall -q src
+      - name: Validate notebook JSON
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          path = Path("notebooks/simcse_pipeline.ipynb")
+          data = json.loads(path.read_text(encoding="utf-8"))
+          assert data["nbformat"] == 4
+          assert data["cells"]
+          print("Notebook JSON is valid")
+          PY
