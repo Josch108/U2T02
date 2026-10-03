@@ -1,130 +1,177 @@
-# U2T02: SimCSE — Train Your Own Sentence Embedding Model 
+# U2T02: SimCSE — Train Your Own Sentence Embedding Model
 
-Proyecto completo para replicar y evaluar **SimCSE** (*Simple Contrastive Learning of Sentence Embeddings*, Gao et al., EMNLP 2021) en modos **Unsupervised** y **Supervised** con *hard negatives*, usando `bert-base-uncased` y el subconjunto `snli_train_100k.jsonl`.
+Implementation of the U2T02 assignment for **Trends in Data Science**. The project reproduces both **unsupervised** and **supervised** SimCSE from `bert-base-uncased` using the supplied `snli_train_100k.jsonl`.
 
----
+## Team
 
-## Estructura del Proyecto
+- Gael Lara — 2309133
+- Josue Chan — 2309048
+- Alberto Arana — 2309010
+- Fabio Martin — 2309148
 
-```
-U2T2/
-├── README.md                      # Guía general de uso y ejecución
-├── requirements.txt               # Dependencias fijadas
-├── snli_train_100k.jsonl          # Dataset SNLI 100k (proporcionado en la tarea)
-├── src/
-│   ├── data_loader.py             # Parser de SNLI 100k y STS-B (dev/test)
-│   ├── models.py                  # Arquitectura SimCSE, pooling y pérdidas contrastivas (Eq. 1 y 5)
-│   ├── evaluate.py                # Evaluación STS-B (Spearman, Alignment, Uniformity)
-│   ├── verify_baselines.py        # Sanity check con raw BERT y SBERT-2019
-│   ├── train.py                   # Entrenamiento completo, logging y selección de checkpoints
-│   └── export_and_publish.py      # Exportación a sentence-transformers y subida a Hugging Face
+## What this repository now does
+
+- Builds the required SNLI subsets:
+  - 165,529 unique sentences for unsupervised training.
+  - 33,351 premise-entailment pairs for supervised training.
+  - Only real contradiction hypotheses are used as hard negatives.
+- Implements Eq. 1 style unsupervised SimCSE with independent dropout views.
+- Implements supervised SimCSE with available contradiction hard negatives.
+- Runs both required ablations:
+  - same dropout mask;
+  - hard negatives OFF.
+- Selects checkpoints only with STS-B dev Spearman.
+- Evaluates STS-B using normalized embeddings, cosine similarity and Spearman.
+- Computes alignment and uniformity.
+- Saves similarity-distribution statistics and nearest-neighbor retrieval examples.
+- Saves one JSON configuration/result set per run plus a global run registry.
+- Exports the selected model to `sentence-transformers`.
+- Can publish to Hugging Face Hub and verify the reloaded model numerically.
+- Generates report-ready benchmark and ablation artifacts from real run outputs.
+
+## Structure
+
+```text
+U2T02/
+├── README.md
+├── requirements.txt
+├── snli_train_100k.jsonl
 ├── notebooks/
-│   └── simcse_pipeline.ipynb      # Notebook interactivo (compatible con Google Colab / local)
+│   └── simcse_pipeline.ipynb
 ├── report/
-│   └── REPORT.md                  # Reporte técnico completo (Partes 1 a 7)
-└── runs/                          # Checkpoints y logs de cada corrida
+│   └── REPORT.md
+└── src/
+    ├── __init__.py
+    ├── data_loader.py
+    ├── models.py
+    ├── evaluate.py
+    ├── train.py
+    ├── verify_baselines.py
+    ├── export_and_publish.py
+    └── make_report_artifacts.py
 ```
 
----
-
-## 1. Instalación de Dependencias
+## 1. Install
 
 ```bash
 pip install -r requirements.txt
 ```
 
----
+The dependency versions are pinned for reproducibility.
 
-## 2. Verificación Inicial de Baselines (Sanity Check)
+## 2. Baseline sanity check
 
-Antes de entrenar, verifica que la métrica STS-B Spearman coincida con los valores de referencia del PDF:
-- **Raw `bert-base-uncased` (mean pooling):** 59.31 Dev / 47.29 Test
-- **SBERT-2019 (`bert-base-nli-mean-tokens`):** 80.77 Dev / 76.98 Test
+During development, use **dev only**:
 
 ```bash
 python -m src.verify_baselines --model both
 ```
 
----
+Expected dev references from the assignment:
 
-## 3. Entrenamiento
+- Raw BERT mean pooling: **59.31**
+- SBERT-2019: **80.77**
 
-Asegúrate de que `snli_train_100k.jsonl` esté en la raíz de `U2T2/`.
-
-### 3.1 Unsupervised SimCSE (Eq. 1)
-```bash
-python -m src.train \
-  --mode unsupervised \
-  --data_path snli_train_100k.jsonl \
-  --output_dir runs \
-  --batch_size 64 \
-  --lr 3e-5 \
-  --temperature 0.05 \
-  --epochs 1 \
-  --seed 42
-```
-
-### 3.2 Ablación Unsupervised: Mismo Dropout Mask
-```bash
-python -m src.train \
-  --mode unsupervised \
-  --data_path snli_train_100k.jsonl \
-  --output_dir runs \
-  --same_dropout_ablation \
-  --batch_size 64 \
-  --lr 3e-5 \
-  --temperature 0.05 \
-  --epochs 1 \
-  --seed 42
-```
-
-### 3.3 Supervised SimCSE con Hard Negatives (Eq. 5)
-```bash
-python -m src.train \
-  --mode supervised \
-  --data_path snli_train_100k.jsonl \
-  --output_dir runs \
-  --batch_size 64 \
-  --lr 5e-5 \
-  --temperature 0.05 \
-  --epochs 3 \
-  --seed 42
-```
-
-### 3.4 Ablación Supervised: Hard Negatives OFF
-```bash
-python -m src.train \
-  --mode supervised \
-  --data_path snli_train_100k.jsonl \
-  --output_dir runs \
-  --no_hard_negatives \
-  --batch_size 64 \
-  --lr 5e-5 \
-  --temperature 0.05 \
-  --epochs 3 \
-  --seed 42
-```
-
----
-
-## 4. Exportar y Publicar en Hugging Face Hub (Parte 7)
-
-Para exportar el mejor modelo como `sentence-transformers`, subirlo al Hub y verificar la paridad numérica:
+For the final benchmark only:
 
 ```bash
-python -m src.export_and_publish \
-  --checkpoint_dir runs/simcse_supervised_seed42/best_checkpoint \
-  --export_dir ./st_best_model \
-  --pooling cls \
-  --mode supervised \
-  --push_to_hub \
-  --repo_id "TU_USUARIO/simcse-bert-base-snli" \
-  --token "TU_HF_TOKEN"
+python -m src.verify_baselines --model both --include_test
 ```
 
-El script:
-1. Exporta el modelo a formato nativo `sentence-transformers`.
-2. Evalúa localmente en STS-B test.
-3. Lo sube al Hub con un Model Card detallado.
-4. Vuelve a descargar el modelo desde el Hub y comprueba que el score en el test split sea exactamente idéntico.
-# U2T02
+## 3. Required runs
+
+### Unsupervised SimCSE
+
+```bash
+python -m src.train   --mode unsupervised   --data_path snli_train_100k.jsonl   --batch_size 64   --lr 3e-5   --temperature 0.05   --epochs 1   --seed 42
+```
+
+### Unsupervised ablation: same dropout mask
+
+```bash
+python -m src.train   --mode unsupervised   --data_path snli_train_100k.jsonl   --same_dropout_ablation   --batch_size 64   --lr 3e-5   --temperature 0.05   --epochs 1   --seed 42
+```
+
+### Supervised SimCSE with real contradiction hard negatives
+
+```bash
+python -m src.train   --mode supervised   --data_path snli_train_100k.jsonl   --batch_size 64   --lr 5e-5   --temperature 0.05   --epochs 3   --seed 42
+```
+
+### Supervised ablation: hard negatives OFF
+
+```bash
+python -m src.train   --mode supervised   --data_path snli_train_100k.jsonl   --no_hard_negatives   --batch_size 64   --lr 5e-5   --temperature 0.05   --epochs 3   --seed 42
+```
+
+Each run writes a directory under `runs/` with:
+
+```text
+config.json
+training_log.jsonl
+run_results.json
+retrieval_analysis.json
+best_checkpoint/
+```
+
+The project also appends each completed experiment to:
+
+```text
+runs/run_registry.jsonl
+```
+
+## 4. Generate report artifacts
+
+After all four runs finish:
+
+```bash
+python -m src.make_report_artifacts   --runs_dir runs   --output_dir report/artifacts
+```
+
+This creates:
+
+- generated benchmark table;
+- real ablation deltas;
+- similarity-distribution plots.
+
+Missing experiments are marked **MISSING** rather than being estimated.
+
+## 5. Publish the selected model to Hugging Face
+
+Example for the supervised run:
+
+```bash
+python -m src.export_and_publish   --run_dir runs/simcse_supervised_seed42   --export_dir st_best_model   --push_to_hub   --repo_id YOUR_USERNAME/simcse-bert-base-snli
+```
+
+Authenticate beforehand with the Hugging Face CLI or pass `--token`.
+
+The script:
+
+1. exports the exact selected checkpoint;
+2. re-evaluates the exported model;
+3. checks parity against the recorded STS-B test score;
+4. uploads the model;
+5. reloads it from the Hub;
+6. evaluates it again;
+7. writes `hub_verification.json`.
+
+## Important methodological decisions
+
+### Hard negatives
+
+The supplied subset has contradiction hypotheses for only about 28% of the supervised entailment pairs. Missing contradictions are **not replaced by positive entailment sentences**. A batch can therefore contain fewer hard negatives than its number of positive pairs.
+
+### MLP policy
+
+This implementation uses the projection MLP during contrastive training and discards it during evaluation/export. This gives a consistent export path for both modes and corresponds to the train-only MLP variant discussed in the SimCSE paper.
+
+### Test split
+
+STS-B dev is used for checkpoint selection. Test is not used to choose checkpoints.
+
+## References
+
+- Gao, T., Yao, X., & Chen, D. (2021). *SimCSE: Simple Contrastive Learning of Sentence Embeddings*. EMNLP 2021.
+- Reimers, N., & Gurevych, I. (2019). *Sentence-BERT: Sentence Embeddings using Siamese BERT-Networks*.
+- Wang, T., & Isola, P. (2020). *Understanding Contrastive Representation Learning through Alignment and Uniformity on the Hypersphere*.

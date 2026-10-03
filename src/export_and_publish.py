@@ -1,200 +1,244 @@
 """
-Model export, publication, and verification script for SimCSE (U2T02).
-Part 7 Requirements:
-  1. Export best SimCSE model into a Sentence-Transformers compatible pipeline.
-  2. Push to Hugging Face Hub with a comprehensive model card.
-  3. Verification: reload model from Hub, re-evaluate on STS-B test split,
-     and confirm numerical equality with local benchmark.
+Export the selected SimCSE checkpoint as a sentence-transformers model,
+optionally publish it to Hugging Face Hub, then reload and verify STS-B parity.
 """
 
 import argparse
-import os
 import json
-import torch
+import os
+from typing import Dict
+
 import numpy as np
+from huggingface_hub import HfApi, login
 from scipy.stats import spearmanr
 from sentence_transformers import SentenceTransformer, models
-from huggingface_hub import HfApi, login
+
 from src.data_loader import load_stsb_data
 
 
-def generate_model_card(
-    repo_id: str,
-    base_model: str,
-    mode: str,
-    recipe: dict,
-    test_spearman: float,
-    dev_spearman: float
-) -> str:
-    """
-    Generates markdown model card for Hugging Face Hub repository.
-    """
-    card = f"""---
+def load_json(path: str) -> Dict:
+    with open(path, "r", encoding="utf-8") as file:
+        return json.load(file)
+
+
+def evaluate_sentence_transformer(model: SentenceTransformer, test_data: list) -> float:
+    sentence1 = [row["sentence1"] for row in test_data]
+    sentence2 = [row["sentence2"] for row in test_data]
+    scores = np.asarray([row["score"] for row in test_data], dtype=np.float32)
+
+    emb1 = model.encode(
+        sentence1,
+        batch_size=64,
+        normalize_embeddings=True,
+        show_progress_bar=False,
+    )
+    emb2 = model.encode(
+        sentence2,
+        batch_size=64,
+        normalize_embeddings=True,
+        show_progress_bar=False,
+    )
+    similarities = (emb1 * emb2).sum(axis=1)
+    return float(spearmanr(similarities, scores).correlation * 100.0)
+
+
+def export_model(
+    checkpoint_dir: str,
+    export_dir: str,
+    pooling_mode: str,
+    max_length: int,
+) -> SentenceTransformer:
+    transformer = models.Transformer(checkpoint_dir, max_seq_length=max_length)
+    pooling = models.Pooling(
+        word_embedding_dimension=transformer.get_word_embedding_dimension(),
+        pooling_mode_cls_token=(pooling_mode == "cls"),
+        pooling_mode_mean_tokens=(pooling_mode == "mean"),
+        pooling_mode_max_tokens=False,
+    )
+    normalize = models.Normalize()
+
+    model = SentenceTransformer(modules=[transformer, pooling, normalize])
+    model.save(export_dir)
+    return model
+
+
+def generate_model_card(repo_id: str, run_results: Dict, verification_score: float) -> str:
+    config = run_results["config"]
+    mode = run_results["mode"]
+    dataset = run_results["dataset"]
+
+    hard_negative_text = (
+        f"{dataset['supervised_pairs_with_hard_negative']:,} of "
+        f"{dataset['supervised_entailment_pairs']:,} supervised pairs contained "
+        "a real contradiction hard negative."
+        if mode == "supervised"
+        else "Not applicable to the unsupervised model."
+    )
+
+    return f"""---
 language:
 - en
 license: apache-2.0
 tags:
 - sentence-transformers
 - sentence-similarity
-- feature-extraction
-- contrastive-learning
 - simcse
+- contrastive-learning
 pipeline_tag: sentence-similarity
 ---
 
 # {repo_id}
 
-This is a **SimCSE ({mode.capitalize()})** sentence embedding model fine-tuned from [`{base_model}`](https://huggingface.co/{base_model}) on the **SNLI 100k** subset for the *Trends in Data Science (U2T02)* assignment.
+Sentence embedding model trained for UPY Trends in Data Science U2T02 using
+SimCSE and bert-base-uncased.
 
-## Method & Architecture
-- **Framework:** SimCSE (Gao et al., 2021)
-- **Base Encoder:** `{base_model}`
-- **Mode:** `{mode}`
-- **Pooling:** `{recipe.get('pooling', 'cls')}` token representation (with L2 normalization)
-- **Temperature (tau):** `{recipe.get('temperature', 0.05)}`
-- **Batch Size:** `{recipe.get('batch_size', 64)}`
-- **Learning Rate:** `{recipe.get('lr', 3e-5)}`
-- **Training Data:** `snli_train_100k.jsonl`
+## Training recipe
 
-## Empirical Evaluation (STS-B)
-Evaluated directly using cosine similarity on sentence pairs (Spearman rank correlation x 100):
-- **STS-B Dev Spearman:** **{dev_spearman:.2f}**
-- **STS-B Test Spearman:** **{test_spearman:.2f}**
+- Mode: **{mode}**
+- Base encoder: bert-base-uncased
+- Training data: supplied snli_train_100k.jsonl
+- Training examples: **{dataset['training_examples']:,}**
+- Batch size: **{config['batch_size']}**
+- Learning rate: **{config['lr']}**
+- Epochs: **{config['epochs']}**
+- Temperature: **{config['temperature']}**
+- Dropout: **{config['dropout']}**
+- Pooling: **{config['pooling']}**
+- Max sequence length: **{config['max_length']}**
+- Seed: **{run_results['seed']}**
+- MLP policy: train-only projection; discarded for evaluation/export
+- Hard negatives: {hard_negative_text}
 
-## Usage with sentence-transformers
+## Evaluation
 
-```python
-from sentence_transformers import SentenceTransformer
-from sklearn.metrics.pairwise import cosine_similarity
+The checkpoint was selected using STS-B dev Spearman only.
 
-# Load model from Hugging Face Hub
-model = SentenceTransformer("{repo_id}")
+- STS-B dev Spearman x100: **{run_results['best_dev_spearman']:.2f}**
+- STS-B test Spearman x100: **{run_results['test_spearman']:.2f}**
+- Reloaded/exported test Spearman x100: **{verification_score:.2f}**
+- Test alignment: **{run_results['test_alignment']:.4f}**
+- Test uniformity: **{run_results['test_uniformity']:.4f}**
 
-sentences = [
-    "A man is playing soccer on the field.",
-    "Someone is playing sports outside.",
-    "A dog is barking at the delivery person."
-]
+Evaluation uses L2-normalized sentence embeddings, cosine similarity and
+Spearman correlation with STS-B human scores. No regressor is used.
 
-embeddings = model.encode(sentences, normalize_embeddings=True)
-similarity = cosine_similarity([embeddings[0]], [embeddings[1]])[0][0]
-print(f"Cosine Similarity (Sent 1 vs Sent 2): {{similarity:.4f}}")
-```
+## Intended use
+
+Educational sentence-similarity and retrieval experiments in English.
 
 ## Limitations
-- Trained on a sampled English 100k subset of SNLI; not suitable for multi-lingual or domain-specific scientific text without domain adaptation.
-- Sentence embeddings are optimized for semantic textual similarity and retrieval on general domain sentences.
+
+- The model was trained on a 100k-record SNLI subset rather than the full data
+  used in the original SimCSE paper.
+- SNLI is dominated by image-caption style sentences, so domain coverage is
+  limited.
+- This model is English-only and was not evaluated for multilingual or
+  specialized-domain use.
+
+## Reference
+
+Gao, T., Yao, X., & Chen, D. (2021). SimCSE: Simple Contrastive Learning of
+Sentence Embeddings. EMNLP 2021.
 """
-    return card
 
 
-def export_to_sentence_transformer(
-    checkpoint_dir: str,
-    export_dir: str,
-    pooling_mode: str = "cls"
-) -> SentenceTransformer:
-    """
-    Assembles SentenceTransformer pipeline:
-      [Transformer] -> [Pooling] -> [Normalize]
-    """
-    print(f"Exporting checkpoint from {checkpoint_dir} to SentenceTransformer format at {export_dir}...")
-    word_embedding_model = models.Transformer(checkpoint_dir, max_seq_length=64)
-    pooling_model = models.Pooling(
-        word_embedding_dimension=word_embedding_model.get_word_embedding_dimension(),
-        pooling_mode_cls_token=(pooling_mode == "cls"),
-        pooling_mode_mean_tokens=(pooling_mode == "mean"),
-        pooling_mode_max_tokens=False
-    )
-    norm_model = models.Normalize()
-
-    st_model = SentenceTransformer(modules=[word_embedding_model, pooling_model, norm_model])
-    st_model.save(export_dir)
-    print(f"Exported successfully to {export_dir}")
-    return st_model
-
-
-def verify_evaluation(model: SentenceTransformer, test_data: list) -> float:
-    """
-    Evaluates SentenceTransformer on STS-B test split.
-    """
-    s1 = [d["sentence1"] for d in test_data]
-    s2 = [d["sentence2"] for d in test_data]
-    scores = np.array([d["score"] for d in test_data])
-
-    emb1 = model.encode(s1, batch_size=64, normalize_embeddings=True, show_progress_bar=False)
-    emb2 = model.encode(s2, batch_size=64, normalize_embeddings=True, show_progress_bar=False)
-
-    cos_sims = (emb1 * emb2).sum(axis=1)
-    spearman_corr, _ = spearmanr(cos_sims, scores)
-    return float(spearman_corr * 100.0)
-
-
-def main():
-    parser = argparse.ArgumentParser(description="Export & Publish SimCSE Model (U2T02)")
-    parser.add_argument("--checkpoint_dir", type=str, required=True, help="Path to best_checkpoint directory")
-    parser.add_argument("--export_dir", type=str, default="./st_exported_model")
-    parser.add_argument("--pooling", type=str, default="cls", choices=["cls", "mean"])
-    parser.add_argument("--mode", type=str, default="supervised", choices=["unsupervised", "supervised"])
+def parse_args():
+    parser = argparse.ArgumentParser(description="Export and publish U2T02 SimCSE")
+    parser.add_argument("--run_dir", required=True)
+    parser.add_argument("--export_dir", default="./st_exported_model")
     parser.add_argument("--push_to_hub", action="store_true")
-    parser.add_argument("--repo_id", type=str, default=None, help="Hugging Face repo id (username/model-name)")
-    parser.add_argument("--token", type=str, default=None, help="Hugging Face API write token")
-    parser.add_argument("--private", action="store_true", help="Set repository to private")
-    args = parser.parse_args()
+    parser.add_argument("--repo_id", default=None)
+    parser.add_argument("--token", default=None)
+    parser.add_argument("--private", action="store_true")
+    return parser.parse_args()
 
-    # 1. Export locally
-    local_st_model = export_to_sentence_transformer(
-        checkpoint_dir=args.checkpoint_dir,
+
+def main() -> None:
+    args = parse_args()
+
+    run_results_path = os.path.join(args.run_dir, "run_results.json")
+    checkpoint_dir = os.path.join(args.run_dir, "best_checkpoint")
+    if not os.path.exists(run_results_path):
+        raise FileNotFoundError(f"Missing run results: {run_results_path}")
+    if not os.path.exists(checkpoint_dir):
+        raise FileNotFoundError(f"Missing checkpoint: {checkpoint_dir}")
+
+    run_results = load_json(run_results_path)
+    config = run_results["config"]
+
+    local_model = export_model(
+        checkpoint_dir=checkpoint_dir,
         export_dir=args.export_dir,
-        pooling_mode=args.pooling
+        pooling_mode=config["pooling"],
+        max_length=config["max_length"],
     )
 
-    # 2. Evaluate locally
-    _, test_stsb = load_stsb_data()
-    local_test_spearman = verify_evaluation(local_st_model, test_stsb)
-    print(f"Local STS-B Test Spearman: {local_test_spearman:.2f}")
+    _, test_data = load_stsb_data()
+    exported_test = evaluate_sentence_transformer(local_model, test_data)
+    recorded_test = float(run_results["test_spearman"])
 
-    # 3. Publish to Hugging Face Hub if requested
+    print(f"Recorded checkpoint test Spearman: {recorded_test:.4f}")
+    print(f"Exported model test Spearman:      {exported_test:.4f}")
+
+    export_delta = abs(recorded_test - exported_test)
+    if export_delta >= 1e-4:
+        raise RuntimeError(
+            "Exported sentence-transformers score does not match the recorded "
+            f"checkpoint score (delta={export_delta:.6f})."
+        )
+
+    card_repo_id = args.repo_id or "YOUR_USERNAME/simcse-bert-base-snli"
+    card = generate_model_card(card_repo_id, run_results, exported_test)
+    with open(os.path.join(args.export_dir, "README.md"), "w", encoding="utf-8") as file:
+        file.write(card)
+
+    verification = {
+        "recorded_test_spearman": recorded_test,
+        "exported_test_spearman": exported_test,
+        "export_delta": export_delta,
+        "hub_reload_test_spearman": None,
+        "hub_reload_delta": None,
+        "verified": export_delta < 1e-4,
+    }
+
     if args.push_to_hub:
         if not args.repo_id:
-            raise ValueError("--repo_id is required when --push_to_hub is set.")
+            raise ValueError("--repo_id is required with --push_to_hub")
         if args.token:
             login(token=args.token)
 
         api = HfApi()
-        api.create_repo(repo_id=args.repo_id, private=args.private, exist_ok=True)
-
-        # Generate Model Card
-        model_card_content = generate_model_card(
+        api.create_repo(
             repo_id=args.repo_id,
-            base_model="bert-base-uncased",
-            mode=args.mode,
-            recipe={"pooling": args.pooling},
-            test_spearman=local_test_spearman,
-            dev_spearman=0.0
+            private=args.private,
+            exist_ok=True,
+            repo_type="model",
         )
-        readme_path = os.path.join(args.export_dir, "README.md")
-        with open(readme_path, "w", encoding="utf-8") as f:
-            f.write(model_card_content)
-
-        print(f"Pushing to Hugging Face Hub: https://huggingface.co/{args.repo_id}...")
         api.upload_folder(
             folder_path=args.export_dir,
             repo_id=args.repo_id,
-            repo_type="model"
+            repo_type="model",
         )
-        print("Upload complete!")
 
-        # 4. Verification: Reload from Hub and re-evaluate
-        print(f"\n--- Verification Step: Reloading from Hub ({args.repo_id}) ---")
         reloaded_model = SentenceTransformer(args.repo_id)
-        reloaded_test_spearman = verify_evaluation(reloaded_model, test_stsb)
-        print(f"Reloaded Hub Model STS-B Test Spearman: {reloaded_test_spearman:.2f}")
+        hub_test = evaluate_sentence_transformer(reloaded_model, test_data)
+        hub_delta = abs(exported_test - hub_test)
 
-        delta = abs(local_test_spearman - reloaded_test_spearman)
-        if delta < 1e-4:
-            print("VERIFICATION SUCCESS: Reloaded Hub model exactly matches local evaluation!")
-        else:
-            print(f"WARNING: Discrepancy observed: local={local_test_spearman:.4f}, hub={reloaded_test_spearman:.4f}")
+        verification["hub_reload_test_spearman"] = hub_test
+        verification["hub_reload_delta"] = hub_delta
+        verification["verified"] = export_delta < 1e-4 and hub_delta < 1e-4
+
+        print(f"Hub reload test Spearman:          {hub_test:.4f}")
+        print(f"Hub reload delta:                  {hub_delta:.6f}")
+
+        if hub_delta >= 1e-4:
+            raise RuntimeError("Hub-reloaded model does not reproduce the local export.")
+
+    verification_path = os.path.join(args.run_dir, "hub_verification.json")
+    with open(verification_path, "w", encoding="utf-8") as file:
+        json.dump(verification, file, indent=2)
+
+    print(f"Verification written to {verification_path}")
 
 
 if __name__ == "__main__":

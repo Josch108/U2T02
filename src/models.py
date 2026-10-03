@@ -1,36 +1,35 @@
 """
-SimCSE model architecture and contrastive loss implementations (U2T02).
-Implements:
-  1. Base encoder (bert-base-uncased) with configurable pooling:
-     - 'cls': [CLS] token representation + optional MLP projection head
-     - 'mean': Mean pooling over active token representations
-  2. Unsupervised SimCSE contrastive objective (Eq. 1 in Gao et al., 2021)
-     - Normal mode: independent dropout masks between view 1 and view 2
-     - Ablation mode: identical dropout mask (same view)
-  3. Supervised SimCSE contrastive objective (Eq. 5 in Gao et al., 2021)
-     - Normal mode: in-batch negatives + hard negatives (contradiction)
-     - Ablation mode: hard negatives turned OFF
+SimCSE model and contrastive objectives for U2T02.
+
+The implementation follows the assignment's two training modes:
+- Unsupervised SimCSE: two stochastic views of the same sentence are created
+  by independent dropout masks.
+- Supervised SimCSE: premise-entailment pairs are positives and only real
+  contradiction examples are used as hard negatives.
+
+For reproducible export, both modes use an MLP during training and discard it
+for evaluation. This matches the train-only MLP variant reported by SimCSE and
+avoids exporting a custom projection head.
 """
+
+from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers import AutoModel, AutoConfig
+from transformers import AutoConfig, AutoModel
 
 
 class MLPPooler(nn.Module):
-    """
-    MLP layer used during SimCSE training (Linear + Tanh).
-    As demonstrated in SimCSE Section 3.2, training with an MLP layer
-    and discarding it during evaluation/inference yields optimal sentence embeddings.
-    """
+    """Linear + tanh projection used only during contrastive training."""
+
     def __init__(self, hidden_size: int):
         super().__init__()
         self.dense = nn.Linear(hidden_size, hidden_size)
         self.activation = nn.Tanh()
 
-    def forward(self, first_token_tensor: torch.Tensor) -> torch.Tensor:
-        return self.activation(self.dense(first_token_tensor))
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.activation(self.dense(x))
 
 
 class SimCSE(nn.Module):
@@ -40,11 +39,10 @@ class SimCSE(nn.Module):
         pooling: str = "cls",
         temperature: float = 0.05,
         dropout_rate: float = 0.1,
-        use_mlp: bool = True
+        use_mlp: bool = True,
     ):
         super().__init__()
         self.config = AutoConfig.from_pretrained(model_name_or_path)
-        # Configure hidden dropout rate
         self.config.attention_probs_dropout_prob = dropout_rate
         self.config.hidden_dropout_prob = dropout_rate
 
@@ -52,135 +50,108 @@ class SimCSE(nn.Module):
         self.pooling = pooling.lower()
         self.temperature = temperature
         self.use_mlp = use_mlp
-
-        if self.use_mlp:
-            self.mlp = MLPPooler(self.config.hidden_size)
-        else:
-            self.mlp = nn.Identity()
+        self.mlp = MLPPooler(self.config.hidden_size) if use_mlp else nn.Identity()
 
     def get_pooled_embedding(
         self,
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor,
-        token_type_ids: torch.Tensor = None,
-        return_for_eval: bool = False
+        token_type_ids: Optional[torch.Tensor] = None,
+        apply_mlp: bool = False,
     ) -> torch.Tensor:
-        """
-        Extracts pooled sentence embedding.
-        If return_for_eval=True, bypasses the MLP pooler (as recommended in SimCSE).
+        """Return one embedding per sentence.
+
+        During training, apply_mlp=True is used. During STS-B evaluation and
+        sentence-transformers export, apply_mlp=False is used.
         """
         kwargs = {"input_ids": input_ids, "attention_mask": attention_mask}
         if token_type_ids is not None:
             kwargs["token_type_ids"] = token_type_ids
 
-        outputs = self.encoder(**kwargs)
-        last_hidden_state = outputs.last_hidden_state
+        hidden = self.encoder(**kwargs).last_hidden_state
 
         if self.pooling == "cls":
-            cls_rep = last_hidden_state[:, 0]
-            if return_for_eval or not self.use_mlp:
-                return cls_rep
-            return self.mlp(cls_rep)
-
+            rep = hidden[:, 0]
         elif self.pooling == "mean":
-            # Mean pooling over non-padding tokens
-            input_mask_expanded = attention_mask.unsqueeze(-1).expand(last_hidden_state.size()).float()
-            sum_embeddings = torch.sum(last_hidden_state * input_mask_expanded, 1)
-            sum_mask = torch.clamp(input_mask_expanded.sum(1), min=1e-9)
-            mean_rep = sum_embeddings / sum_mask
-            if return_for_eval or not self.use_mlp:
-                return mean_rep
-            return self.mlp(mean_rep)
-
+            mask = attention_mask.unsqueeze(-1).expand(hidden.size()).float()
+            rep = (hidden * mask).sum(dim=1) / torch.clamp(mask.sum(dim=1), min=1e-9)
         else:
-            raise ValueError(f"Unsupported pooling mode: {self.pooling}. Use 'cls' or 'mean'.")
+            raise ValueError(f"Unsupported pooling mode: {self.pooling}")
+
+        if apply_mlp and self.use_mlp:
+            rep = self.mlp(rep)
+        return rep
 
     def forward_unsupervised(
         self,
         batch_inputs: dict,
-        same_dropout_ablation: bool = False
+        same_dropout_ablation: bool = False,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Unsupervised SimCSE forward pass (Eq. 1).
-        batch_inputs: tokenized inputs for a batch of sentences.
-        If same_dropout_ablation=True: passes through encoder once and duplicates z1,
-        effectively testing zero contrastive variance (identical dropout mask).
-        """
-        input_ids = batch_inputs["input_ids"]
-        attention_mask = batch_inputs["attention_mask"]
-        token_type_ids = batch_inputs.get("token_type_ids", None)
+        """Unsupervised SimCSE objective (Eq. 1)."""
+        ids = batch_inputs["input_ids"]
+        mask = batch_inputs["attention_mask"]
+        token_types = batch_inputs.get("token_type_ids")
 
-        z1 = self.get_pooled_embedding(input_ids, attention_mask, token_type_ids, return_for_eval=False)
+        z1 = self.get_pooled_embedding(ids, mask, token_types, apply_mlp=True)
 
         if same_dropout_ablation:
-            # Ablation: exact same representation / identical dropout mask
+            # Exact same stochastic view: the required ablation.
             z2 = z1
         else:
-            # Standard: second forward pass with independent dropout mask
-            z2 = self.get_pooled_embedding(input_ids, attention_mask, token_type_ids, return_for_eval=False)
+            # Independent second forward pass -> independent dropout mask.
+            z2 = self.get_pooled_embedding(ids, mask, token_types, apply_mlp=True)
 
-        # Normalize embeddings
-        z1_norm = F.normalize(z1, p=2, dim=1)
-        z2_norm = F.normalize(z2, p=2, dim=1)
+        z1 = F.normalize(z1, p=2, dim=1)
+        z2 = F.normalize(z2, p=2, dim=1)
 
-        # Cosine similarity matrix between view 1 and view 2: (batch_size, batch_size)
-        cos_sim = torch.mm(z1_norm, z2_norm.transpose(0, 1)) / self.temperature
-
-        # Labels: diagonal entries are positive pairs
-        batch_size = z1_norm.size(0)
-        labels = torch.arange(batch_size, device=z1_norm.device)
-
-        loss = F.cross_entropy(cos_sim, labels)
-        return loss, cos_sim
+        logits = torch.mm(z1, z2.transpose(0, 1)) / self.temperature
+        labels = torch.arange(z1.size(0), device=z1.device)
+        loss = F.cross_entropy(logits, labels)
+        return loss, logits
 
     def forward_supervised(
         self,
         premise_inputs: dict,
         entailment_inputs: dict,
-        contradiction_inputs: dict = None,
-        use_hard_negatives: bool = True
+        contradiction_inputs: Optional[dict] = None,
+        use_hard_negatives: bool = True,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Supervised SimCSE objective (Eq. 5).
+
+        The supplied subset has hard negatives for only about 28% of positive
+        pairs. Therefore contradiction_inputs contains only REAL contradiction
+        sentences present in the current batch. Missing contradictions are not
+        replaced by positives.
         """
-        Supervised SimCSE forward pass (Eq. 5).
-        premise_inputs: anchors (h_i)
-        entailment_inputs: positives (h_i^+)
-        contradiction_inputs: hard negatives (h_i^-), optional
-        """
-        h_premise = self.get_pooled_embedding(
+        hp = self.get_pooled_embedding(
             premise_inputs["input_ids"],
             premise_inputs["attention_mask"],
-            premise_inputs.get("token_type_ids", None),
-            return_for_eval=False
+            premise_inputs.get("token_type_ids"),
+            apply_mlp=True,
         )
-        h_entail = self.get_pooled_embedding(
+        he = self.get_pooled_embedding(
             entailment_inputs["input_ids"],
             entailment_inputs["attention_mask"],
-            entailment_inputs.get("token_type_ids", None),
-            return_for_eval=False
+            entailment_inputs.get("token_type_ids"),
+            apply_mlp=True,
         )
 
-        h_premise_norm = F.normalize(h_premise, p=2, dim=1)
-        h_entail_norm = F.normalize(h_entail, p=2, dim=1)
+        hp = F.normalize(hp, p=2, dim=1)
+        he = F.normalize(he, p=2, dim=1)
+        positive_logits = torch.mm(hp, he.transpose(0, 1)) / self.temperature
 
-        sim_pos = torch.mm(h_premise_norm, h_entail_norm.transpose(0, 1)) / self.temperature
-        batch_size = h_premise_norm.size(0)
-
+        logits = positive_logits
         if use_hard_negatives and contradiction_inputs is not None:
-            h_contra = self.get_pooled_embedding(
+            hc = self.get_pooled_embedding(
                 contradiction_inputs["input_ids"],
                 contradiction_inputs["attention_mask"],
-                contradiction_inputs.get("token_type_ids", None),
-                return_for_eval=False
+                contradiction_inputs.get("token_type_ids"),
+                apply_mlp=True,
             )
-            h_contra_norm = F.normalize(h_contra, p=2, dim=1)
-            sim_hard_neg = torch.mm(h_premise_norm, h_contra_norm.transpose(0, 1)) / self.temperature
+            hc = F.normalize(hc, p=2, dim=1)
+            hard_logits = torch.mm(hp, hc.transpose(0, 1)) / self.temperature
+            logits = torch.cat([positive_logits, hard_logits], dim=1)
 
-            # Concatenate positives matrix (N x N) and hard negatives matrix (N x N) -> (N x 2N)
-            sim_matrix = torch.cat([sim_pos, sim_hard_neg], dim=1)
-        else:
-            # Hard negatives OFF ablation: only N in-batch candidates
-            sim_matrix = sim_pos
-
-        labels = torch.arange(batch_size, device=h_premise_norm.device)
-        loss = F.cross_entropy(sim_matrix, labels)
-        return loss, sim_matrix
+        labels = torch.arange(hp.size(0), device=hp.device)
+        loss = F.cross_entropy(logits, labels)
+        return loss, logits
