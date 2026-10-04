@@ -66,11 +66,11 @@ The dropout ablation produced a much larger degradation than the expected ±1–
 U2T02/
 ├── README.md
 ├── requirements.txt
-├── snli_train_100k.jsonl
+├── # snli_train_100k.jsonl supplied separately by the instructor
 ├── notebooks/
 │   └── simcse_pipeline.ipynb
 ├── report/
-│   └── REPORT.md
+│   └── main.tex
 └── src/
     ├── __init__.py
     ├── data_loader.py
@@ -79,7 +79,8 @@ U2T02/
     ├── train.py
     ├── verify_baselines.py
     ├── export_and_publish.py
-    └── make_report_artifacts.py
+    ├── make_report_artifacts.py
+    └── preflight.py
 ```
 
 ## 1. Install
