@@ -126,14 +126,29 @@ def load_snli_100k(file_path: str) -> Tuple[List[str], List[Dict[str, Optional[s
 
 
 def load_stsb_data() -> Tuple[List[Dict], List[Dict]]:
+    """Load STS-B with human scores expressed on the original 0-5 scale.
+
+    The sentence-transformers/stsb dataset currently exposes normalized scores
+    in [0, 1]. Spearman is invariant to this scaling, but alignment thresholds
+    and rating-bin analyses are not. Converting back to 0-5 keeps the geometry
+    analysis consistent with the SimCSE paper (positive pairs: human score >= 4).
+    """
     dataset = load_dataset("sentence-transformers/stsb")
+
+    all_scores = [
+        float(row["score"])
+        for split_name in ("validation", "test")
+        for row in dataset[split_name]
+    ]
+    max_score = max(all_scores)
+    score_scale = 5.0 if max_score <= 1.0 + 1e-8 else 1.0
 
     def convert(split) -> List[Dict]:
         return [
             {
                 "sentence1": row["sentence1"],
                 "sentence2": row["sentence2"],
-                "score": float(row["score"]),
+                "score": float(row["score"]) * score_scale,
             }
             for row in split
         ]
@@ -141,6 +156,7 @@ def load_stsb_data() -> Tuple[List[Dict], List[Dict]]:
     dev_data = convert(dataset["validation"])
     test_data = convert(dataset["test"])
 
+    print(f"STS-B score scale: 0-5 (source multiplier: {score_scale:g}x)")
     print(f"STS-B dev pairs: {len(dev_data):,}")
     print(f"STS-B test pairs: {len(test_data):,}")
     return dev_data, test_data
