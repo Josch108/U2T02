@@ -1,0 +1,10 @@
+{
+  "model_repo": "zakerzel/upy-u2t02-simcse-supervised",
+  "model_url": "https://huggingface.co/zakerzel/upy-u2t02-simcse-supervised",
+  "recorded_test_spearman": 78.31809109486845,
+  "exported_test_spearman": 78.3180965925998,
+  "export_delta": 5.497731351056245e-06,
+  "hub_reload_test_spearman": 78.3180965925998,
+  "hub_reload_delta": 0.0,
+  "verified": true
+}
