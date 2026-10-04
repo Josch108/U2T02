@@ -4,7 +4,8 @@ STS-B score scale (0-1 -> original 0-5).
 
 This does NOT retrain models. It reloads each saved best_checkpoint, recomputes
 STS-B test Spearman/alignment/uniformity, rating-bin distributions, and
-retrieval examples, then overwrites run_results.json and retrieval_analysis.json.
+retrieval examples, then updates run_results.json, retrieval_analysis.json,
+and the global run registry.
 
 Usage:
     python -m src.recompute_metrics --runs_dir runs
@@ -36,6 +37,12 @@ def write_json(path, payload):
         json.dump(payload, file, indent=2, ensure_ascii=False)
 
 
+def write_jsonl(path, rows):
+    with open(path, "w", encoding="utf-8") as file:
+        for row in rows:
+            file.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
 def get_device():
     if torch.cuda.is_available():
         return "cuda"
@@ -61,6 +68,8 @@ def main():
         "simcse_supervised_seed42",
         "simcse_supervised_no_hard_negatives_seed42",
     ]
+
+    updated_results = {}
 
     for run_name in run_names:
         run_dir = os.path.join(args.runs_dir, run_name)
@@ -121,6 +130,7 @@ def main():
 
         write_json(result_path, result)
         write_json(os.path.join(run_dir, "retrieval_analysis.json"), retrieval)
+        updated_results[run_name] = result
 
         print(
             f"{run_name}: "
@@ -128,6 +138,36 @@ def main():
             f"alignment={evaluation['alignment']:.4f} | "
             f"uniformity={evaluation['uniformity']:.4f}"
         )
+
+        del model
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    registry_path = os.path.join(args.runs_dir, "run_registry.jsonl")
+    if os.path.exists(registry_path):
+        existing = [
+            json.loads(line)
+            for line in open(registry_path, "r", encoding="utf-8")
+            if line.strip()
+        ]
+        rebuilt = []
+        for row in existing:
+            result = updated_results.get(row.get("run_name"))
+            if result:
+                row["test_spearman"] = result["test_spearman"]
+                row["test_alignment"] = result["test_alignment"]
+                row["test_uniformity"] = result["test_uniformity"]
+                row["metrics_recomputed_after_score_scale_fix"] = True
+            rebuilt.append(row)
+        write_jsonl(registry_path, rebuilt)
+        print(f"Updated registry: {registry_path}")
+
+    note = {
+        "reason": "STS-B source scores were normalized to 0-1 but geometry analysis expected the original 0-5 human scale.",
+        "effect": "Spearman is unchanged by linear score scaling. Test alignment and human-rating distributions were recomputed. Uniformity is also regenerated from the same saved embeddings.",
+        "training_logs": "Historical training_log.jsonl files are preserved. Their dev_spearman values are valid; any dev_alignment field written before this repair should not be used in the final report.",
+    }
+    write_json(os.path.join(args.runs_dir, "metric_repair_note.json"), note)
 
 
 if __name__ == "__main__":
