@@ -1,0 +1,203 @@
+\documentclass[10pt,conference]{IEEEtran}
+\IEEEoverridecommandlockouts
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{graphicx}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{float}
+\usepackage{url}
+\usepackage{hyperref}
+\usepackage{enumitem}
+\hypersetup{colorlinks=true,linkcolor=black,citecolor=black,urlcolor=blue}
+
+\begin{document}
+
+% ================= COVER PAGE =================
+\begin{titlepage}
+\centering
+\vspace*{0.8cm}
+\IfFileExists{upy_logo.png}{
+  \includegraphics[width=0.82\textwidth]{upy_logo.png}
+}{
+  \fbox{\parbox[c][3cm][c]{0.78\textwidth}{\centering\textbf{UPY logo}\\
+  Upload as \texttt{report/upy\_logo.png}}}
+}
+\vspace{1.0cm}
+{\Large\textbf{Universidad Polit\'ecnica de Yucat\'an}\par}
+\vspace{0.2cm}
+{\large Data Engineering --- Group ID9A\par}
+\vspace{1cm}
+{\Large\textbf{Trends in Data Science}\par}
+\vspace{0.35cm}
+{\LARGE\textbf{U2T02: SimCSE --- Train Your Own Sentence Embedding Model}\par}
+\vspace{1.0cm}
+\begin{tabular}{rl}
+\textbf{Students:} & Gael Lara --- 2309133 \\
+& Josue Chan --- 2309048 \\
+& Alberto Arana --- 2309010 \\
+& Fabio Martin --- 2309148 \\
+\\
+\textbf{Course:} & Trends in Data Science \\
+\textbf{Institution:} & Universidad Polit\'ecnica de Yucat\'an \\
+\textbf{Date:} & October 2026
+\end{tabular}
+\vfill
+\end{titlepage}
+
+\clearpage
+\setcounter{page}{1}
+
+\title{SimCSE: Train Your Own Sentence Embedding Model}
+\author{
+\IEEEauthorblockN{Gael Lara (2309133), Josue Chan (2309048), Alberto Arana (2309010), Fabio Martin (2309148)}
+\IEEEauthorblockA{Data Engineering 9A\\Universidad Polit\'ecnica de Yucat\'an\\M\'erida, Yucat\'an, M\'exico}
+}
+\maketitle
+
+\begin{abstract}
+This report presents the implementation and evaluation of unsupervised and supervised SimCSE starting from \texttt{bert-base-uncased}. Training used the supplied 100k-record SNLI subset and evaluation used STS-B with normalized embeddings, cosine similarity, and Spearman correlation. The required ablations were also performed. The strongest model was supervised SimCSE, reaching 82.29 dev and 78.32 test Spearman. The selected model was published to the Hugging Face Hub and reproduced the same test score after reloading.
+\end{abstract}
+
+\begin{IEEEkeywords}
+SimCSE, sentence embeddings, contrastive learning, BERT, STS-B, Hugging Face
+\end{IEEEkeywords}
+
+\section{Introduction}
+BERT produces strong token representations, but directly pooled BERT vectors do not necessarily form a useful sentence embedding space. SimCSE improves sentence representations through contrastive learning. In the unsupervised variant, the same sentence is encoded twice and independent dropout creates two positive views. In the supervised variant, entailment pairs provide positives and contradiction hypotheses can act as hard negatives \cite{gao2021}.
+
+\section{Data and Methodology}
+The supplied \texttt{snli\_train\_100k.jsonl} contains 100,000 SNLI records. From it, the pipeline produced 165,529 unique sentences for unsupervised training, 33,351 premise--entailment pairs for supervised training, and 9,488 positive pairs with a real contradiction hard negative (28.45\%). STS-B was used for evaluation with 1,500 dev pairs and 1,379 test pairs.
+
+\subsection{Unsupervised Objective}
+For a batch of $N$ sentences, the same sentence is encoded twice with independent dropout masks:
+\begin{equation}
+\ell_i=-\log\frac{\exp(\operatorname{sim}(h_i,h_i^+)/\tau)}{\sum_{j=1}^{N}\exp(\operatorname{sim}(h_i,h_j^+)/\tau)}.
+\end{equation}
+With batch size 64, each anchor is contrasted against 63 ordinary in-batch negatives.
+
+\subsection{Supervised Objective}
+The supervised variant uses premise--entailment pairs as positives and real contradiction hypotheses as hard negatives. Missing contradictions are not replaced with entailment examples. For a batch with $N$ positive pairs and $H$ available contradictions, each anchor has $N-1+H$ negative candidates.
+
+\subsection{Training Configuration}
+\begin{table}[H]
+\centering
+\caption{Training configuration}
+\begin{tabular}{lcc}
+\toprule
+\textbf{Parameter} & \textbf{Unsup.} & \textbf{Sup.} \\
+\midrule
+Base model & \multicolumn{2}{c}{bert-base-uncased} \\
+Batch size & 64 & 64 \\
+Learning rate & $3\times10^{-5}$ & $5\times10^{-5}$ \\
+Epochs & 1 & 3 \\
+Temperature & 0.05 & 0.05 \\
+Dropout & 0.10 & 0.10 \\
+Pooling & CLS & CLS \\
+Seed & 42 & 42 \\
+GPU & L4 & L4 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Baseline Validation}
+Before training, the evaluator reproduced the assignment references:
+\begin{table}[H]
+\centering
+\caption{Baseline results}
+\begin{tabular}{lrrrr}
+\toprule
+\textbf{Model} & \textbf{Dev} & \textbf{Test} & \textbf{Align.} & \textbf{Unif.} \\
+\midrule
+Raw BERT & 59.31 & 47.29 & 0.2155 & -1.6186 \\
+SBERT-2019 & 80.77 & 76.99 & 0.1798 & -3.0493 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Main Results}
+\begin{table*}[t]
+\centering
+\caption{Final STS-B benchmark. Spearman is reported as $\times100$.}
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Model} & \textbf{Dev} & \textbf{Test} & \textbf{Alignment} & \textbf{Uniformity} \\
+\midrule
+Raw bert-base-uncased (mean) & 59.31 & 47.29 & 0.2155 & -1.6186 \\
+SBERT-2019 & 80.77 & 76.99 & 0.1798 & -3.0493 \\
+SimCSE Unsupervised (ours) & 76.56 & 68.27 & 0.3285 & -2.7517 \\
+\textbf{SimCSE Supervised (ours)} & \textbf{82.29} & \textbf{78.32} & \textbf{0.1377} & \textbf{-2.2771} \\
+SimCSE Unsupervised (paper) & 82.50 & 76.85 & -- & -- \\
+SimCSE Supervised (paper) & 86.20 & 84.25 & -- & -- \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+The supervised model was the strongest model trained in this work. It surpassed SBERT-2019 by approximately 1.33 points on STS-B test. The unsupervised model also substantially improved over raw BERT.
+
+\section{Ablation Study}
+\subsection{Same Dropout Mask}
+\begin{table}[H]
+\centering
+\caption{Unsupervised dropout ablation}
+\begin{tabular}{lrr}
+\toprule
+Configuration & Dev & Test \\
+\midrule
+Independent dropout & 76.56 & 68.27 \\
+Same dropout mask & 55.28 & 47.63 \\
+\textbf{Delta} & \textbf{-21.28} & \textbf{-20.64} \\
+\bottomrule
+\end{tabular}
+\end{table}
+The large degradation shows that independent dropout views are essential for the unsupervised objective.
+
+\subsection{Hard Negatives OFF}
+\begin{table}[H]
+\centering
+\caption{Supervised hard-negative ablation}
+\begin{tabular}{lrr}
+\toprule
+Configuration & Dev & Test \\
+\midrule
+Hard negatives ON & 82.29 & 78.32 \\
+Hard negatives OFF & 82.27 & 77.44 \\
+\textbf{Delta} & \textbf{-0.02} & \textbf{-0.88} \\
+\bottomrule
+\end{tabular}
+\end{table}
+The hard-negative effect is small in this single-seed experiment and should not be over-interpreted.
+
+\section{Similarity Distribution and Retrievals}
+For the supervised model, mean cosine similarity increased with the human STS-B score: 0.531 for score bin 0--1, 0.747 for 1--2, 0.813 for 2--3, 0.871 for 3--4, and 0.931 for 4--5.
+
+A successful retrieval example used the query ``A man sings with a guitar.'' The top neighbor was ``A man is singing while playing the guitar.'' with cosine 0.9730.
+
+A representative failure used the query ``The man is mixing whipping cream.'' The nearest neighbor was ``A man is cutting pieces of butter into a mixing bowl.'' with cosine 0.7626. The sentences share a cooking context but describe different actions, showing that the model can over-weight topical similarity.
+
+\section{Gap with the Paper}
+The original SimCSE paper reports 82.50 dev / 76.85 test for unsupervised BERT-base and 86.20 dev / 84.25 test for supervised BERT-base \cite{gao2021}. Our training corpus is substantially smaller, contains only 33,351 supervised positives, has hard negatives for only 28.45\% of them, and uses batch size 64. These differences explain why a performance gap is plausible, but the experiment does not support assigning causal percentages to individual factors.
+
+\section{Hugging Face Publication}
+The selected supervised model was published at:
+
+\url{https://huggingface.co/zakerzel/upy-u2t02-simcse-supervised}
+
+The recorded checkpoint test Spearman was 78.318091. The exported model scored 78.318097. After upload and reload from the Hub, the score remained 78.318097, producing a Hub reload delta of 0.000000. This verifies numerical reproduction of the published model.
+
+\section{Limitations}
+Only one seed was used for the required runs. The training data are much smaller and less diverse than the original SimCSE setup, contradiction coverage is incomplete, and retrieval analysis is qualitative. Historical intermediate alignment values before the STS-B score-scale repair were excluded from the final analysis; the report uses only the final recomputed metrics.
+
+\section{Conclusion}
+Both SimCSE modes were successfully implemented and evaluated. Contrastive training substantially improved sentence representations over raw BERT. Independent dropout was essential for the unsupervised objective, while supervised SimCSE produced the strongest result at 82.29 dev and 78.32 test Spearman. The selected model was successfully published to Hugging Face and reproduced exactly after reload.
+
+\begin{thebibliography}{00}
+\bibitem{gao2021} T. Gao, X. Yao, and D. Chen, ``SimCSE: Simple Contrastive Learning of Sentence Embeddings,'' in \textit{Proc. EMNLP}, 2021, pp. 6894--6910.
+\bibitem{reimers2019} N. Reimers and I. Gurevych, ``Sentence-BERT: Sentence Embeddings using Siamese BERT-Networks,'' in \textit{Proc. EMNLP-IJCNLP}, 2019, pp. 3982--3992.
+\bibitem{wang2020} T. Wang and P. Isola, ``Understanding Contrastive Representation Learning through Alignment and Uniformity on the Hypersphere,'' in \textit{Proc. ICML}, 2020, pp. 9929--9939.
+\bibitem{hfmodel} Zakerzel, ``upy-u2t02-simcse-supervised,'' Hugging Face Hub, 2026. [Online]. Available: \url{https://huggingface.co/zakerzel/upy-u2t02-simcse-supervised}
+\end{thebibliography}
+
+\end{document}
