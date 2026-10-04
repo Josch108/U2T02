@@ -9,6 +9,37 @@ Implementation of the U2T02 assignment for **Trends in Data Science**. The proje
 - Alberto Arana — 2309010
 - Fabio Martin — 2309148
 
+## Final result
+
+The selected model is the **supervised SimCSE seed-42 checkpoint**, chosen by STS-B dev Spearman.
+
+- Hugging Face model: [zakerzel/upy-u2t02-simcse-supervised](https://huggingface.co/zakerzel/upy-u2t02-simcse-supervised)
+- Dev Spearman x100: **82.29**
+- Test Spearman x100: **78.32**
+- Test alignment: **0.1377**
+- Test uniformity: **-2.2771**
+- Hub reload test Spearman x100: **78.3181**
+- Hub reload delta: **0.000000**
+- Hub verification: **passed**
+
+### Final benchmark
+
+| Model | Dev Spearman | Test Spearman | Alignment | Uniformity |
+|---|---:|---:|---:|---:|
+| Raw bert-base-uncased (mean) | 59.31 | 47.29 | 0.2155 | -1.6186 |
+| SBERT-2019 | 80.77 | 76.99 | 0.1798 | -3.0493 |
+| SimCSE Unsupervised (ours) | 76.56 | 68.27 | 0.3285 | -2.7517 |
+| **SimCSE Supervised (ours)** | **82.29** | **78.32** | **0.1377** | **-2.2771** |
+| SimCSE Unsupervised (paper) | 82.50 | 76.85 | — | — |
+| SimCSE Supervised (paper) | 86.20 | 84.25 | — | — |
+
+### Ablations
+
+- Same-dropout unsupervised ablation: **-21.28 dev / -20.64 test**.
+- Hard-negatives-OFF supervised ablation: **-0.02 dev / -0.88 test**.
+
+The dropout ablation produced a much larger degradation than the expected ±1–3 point seed variation described in the assignment. The hard-negative difference is much smaller and should not be over-interpreted from a single seed.
+
 ## What this repository now does
 
 - Builds the required SNLI subsets:
@@ -138,10 +169,18 @@ Missing experiments are marked **MISSING** rather than being estimated.
 
 ## 5. Publish the selected model to Hugging Face
 
-Example for the supervised run:
+The selected supervised model was published to:
+
+[https://huggingface.co/zakerzel/upy-u2t02-simcse-supervised](https://huggingface.co/zakerzel/upy-u2t02-simcse-supervised)
+
+Reproduction command:
 
 ```bash
-python -m src.export_and_publish   --run_dir runs/simcse_supervised_seed42   --export_dir st_best_model   --push_to_hub   --repo_id YOUR_USERNAME/simcse-bert-base-snli
+python -m src.export_and_publish \
+  --run_dir runs/simcse_supervised_seed42 \
+  --export_dir st_best_model \
+  --push_to_hub \
+  --repo_id zakerzel/upy-u2t02-simcse-supervised
 ```
 
 Authenticate beforehand with the Hugging Face CLI or pass `--token`.
